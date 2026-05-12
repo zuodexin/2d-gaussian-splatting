@@ -48,9 +48,30 @@ def loadCam(args, id, cam_info, resolution_scale):
         loaded_mask = None
         gt_image = resized_image_rgb
 
-    return Camera(colmap_id=cam_info.uid, R=cam_info.R, T=cam_info.T, 
-                  FoVx=cam_info.FovX, FoVy=cam_info.FovY, 
+    # Load depth if available: resize to match image resolution, convert to torch tensor (1, H, W)
+    gt_depth = None
+    if cam_info.depth is not None:
+        import torch
+        import torch.nn.functional as F
+        depth_np = cam_info.depth  # (H, W), float32, meters
+        depth_tensor = torch.from_numpy(depth_np).unsqueeze(0).unsqueeze(0)  # (1, 1, H, W)
+        depth_tensor = F.interpolate(depth_tensor, size=(resolution[1], resolution[0]), mode="nearest")
+        gt_depth = depth_tensor.squeeze(0)  # (1, H, W)
+
+    # Load normal if available: resize and keep as (3, H, W) float32 in [-1, 1]
+    gt_normal = None
+    if getattr(cam_info, 'normal', None) is not None:
+        import torch
+        import torch.nn.functional as F
+        normal_np = cam_info.normal  # (H, W, 3), float32, [-1, 1]
+        normal_tensor = torch.from_numpy(normal_np).permute(2, 0, 1).unsqueeze(0)  # (1, 3, H, W)
+        normal_tensor = F.interpolate(normal_tensor, size=(resolution[1], resolution[0]), mode="bilinear", align_corners=False)
+        gt_normal = torch.nn.functional.normalize(normal_tensor.squeeze(0), dim=0)  # (3, H, W)
+
+    return Camera(colmap_id=cam_info.uid, R=cam_info.R, T=cam_info.T,
+                  FoVx=cam_info.FovX, FoVy=cam_info.FovY,
                   image=gt_image, gt_alpha_mask=loaded_mask,
+                  gt_depth=gt_depth, gt_normal=gt_normal,
                   image_name=cam_info.image_name, uid=id, data_device=args.data_device)
 
 def cameraList_from_camInfos(cam_infos, resolution_scale, args):

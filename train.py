@@ -48,6 +48,8 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
     ema_loss_for_log = 0.0
     ema_dist_for_log = 0.0
     ema_normal_for_log = 0.0
+    ema_depth_for_log = 0.0
+    ema_gt_normal_for_log = 0.0
 
     progress_bar = tqdm(range(first_iter, opt.iterations), desc="Training progress")
     first_iter += 1
@@ -80,12 +82,38 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
         rend_dist = render_pkg["rend_dist"]
         rend_normal  = render_pkg['rend_normal']
         surf_normal = render_pkg['surf_normal']
+        surf_depth = render_pkg['surf_depth']  # (1, H, W)
         normal_error = (1 - (rend_normal * surf_normal).sum(dim=0))[None]
         normal_loss = lambda_normal * (normal_error).mean()
         dist_loss = lambda_dist * (rend_dist).mean()
 
+        # Depth supervision loss (only when gt_depth is available)
+        depth_loss = torch.tensor(0.0, device="cuda")
+        if viewpoint_cam.gt_depth is not None and opt.lambda_depth > 0:
+            gt_depth = viewpoint_cam.gt_depth  # (1, H, W)
+            valid_mask = gt_depth > 0
+            if valid_mask.any():
+                depth_loss = opt.lambda_depth * l1_loss(
+                    surf_depth[valid_mask], gt_depth[valid_mask]
+                )
+
+        # GT normal supervision loss (only when gt_normal is available)
+        gt_normal_loss = torch.tensor(0.0, device="cuda")
+        if viewpoint_cam.gt_normal is not None and opt.lambda_gt_normal > 0:
+            gt_normal = viewpoint_cam.gt_normal  # (3, H, W), [-1, 1]
+            # rend_normal is (3, H, W) in [-1, 1]
+            # use alpha mask to only supervise foreground pixels
+            if viewpoint_cam.gt_alpha_mask is not None:
+                fg_mask = (viewpoint_cam.gt_alpha_mask > 0.5).squeeze(0)  # (H, W)
+            else:
+                fg_mask = torch.ones(gt_normal.shape[1:], dtype=torch.bool, device="cuda")
+            if fg_mask.any():
+                pred_n = rend_normal[:, fg_mask]   # (3, N)
+                gt_n   = gt_normal[:, fg_mask]     # (3, N)
+                gt_normal_loss = opt.lambda_gt_normal * (1 - (pred_n * gt_n).sum(dim=0)).mean()
+
         # loss
-        total_loss = loss + dist_loss + normal_loss
+        total_loss = loss + dist_loss + normal_loss + depth_loss + gt_normal_loss
         
         total_loss.backward()
 
@@ -96,6 +124,8 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
             ema_loss_for_log = 0.4 * loss.item() + 0.6 * ema_loss_for_log
             ema_dist_for_log = 0.4 * dist_loss.item() + 0.6 * ema_dist_for_log
             ema_normal_for_log = 0.4 * normal_loss.item() + 0.6 * ema_normal_for_log
+            ema_depth_for_log = 0.4 * depth_loss.item() + 0.6 * ema_depth_for_log
+            ema_gt_normal_for_log = 0.4 * gt_normal_loss.item() + 0.6 * ema_gt_normal_for_log
 
 
             if iteration % 10 == 0:
@@ -103,6 +133,8 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                     "Loss": f"{ema_loss_for_log:.{5}f}",
                     "distort": f"{ema_dist_for_log:.{5}f}",
                     "normal": f"{ema_normal_for_log:.{5}f}",
+                    "depth": f"{ema_depth_for_log:.{5}f}",
+                    "gt_normal": f"{ema_gt_normal_for_log:.{5}f}",
                     "Points": f"{len(gaussians.get_xyz)}"
                 }
                 progress_bar.set_postfix(loss_dict)
@@ -115,6 +147,8 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
             if tb_writer is not None:
                 tb_writer.add_scalar('train_loss_patches/dist_loss', ema_dist_for_log, iteration)
                 tb_writer.add_scalar('train_loss_patches/normal_loss', ema_normal_for_log, iteration)
+                tb_writer.add_scalar('train_loss_patches/depth_loss', ema_depth_for_log, iteration)
+                tb_writer.add_scalar('train_loss_patches/gt_normal_loss', ema_gt_normal_for_log, iteration)
 
             training_report(tb_writer, iteration, Ll1, loss, l1_loss, iter_start.elapsed_time(iter_end), testing_iterations, scene, render, (pipe, background))
             if (iteration in saving_iterations):
