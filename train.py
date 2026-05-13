@@ -28,6 +28,9 @@ try:
 except ImportError:
     TENSORBOARD_FOUND = False
 
+if os.environ.get("DISABLE_TENSORBOARD", "").lower() in ("1", "true", "yes"):
+    TENSORBOARD_FOUND = False
+
 def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoint_iterations, checkpoint, gui_enabled: bool = False):
     first_iter = 0
     tb_writer = prepare_output_and_logger(dataset)
